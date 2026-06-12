@@ -18,7 +18,25 @@ export async function prepareImageForOcr(source) {
   ctx.drawImage(bitmap, 0, 0, w, h)
   bitmap.close()
 
+  enhanceForOcr(ctx, w, h)
+
   return canvas
+}
+
+function enhanceForOcr(ctx, width, height) {
+  const imageData = ctx.getImageData(0, 0, width, height)
+  const { data } = imageData
+  const contrast = 1.4
+
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+    const enhanced = Math.min(255, Math.max(0, (gray - 128) * contrast + 128))
+    data[i] = enhanced
+    data[i + 1] = enhanced
+    data[i + 2] = enhanced
+  }
+
+  ctx.putImageData(imageData, 0, 0)
 }
 
 export function canvasToObjectUrl(canvas) {

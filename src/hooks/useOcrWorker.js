@@ -27,7 +27,8 @@ export function useOcrWorker(isActive) {
       initPromiseRef.current = (async () => {
         const worker = await createWorker('swe', 1, { logger: () => {} })
         await worker.setParameters({
-          tessedit_pageseg_mode: '6',
+          tessedit_pageseg_mode: '11',
+          tessedit_char_whitelist: '0123456789krKR:,.- SEK',
         })
         workerRef.current = worker
       })()

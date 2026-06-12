@@ -1,38 +1,73 @@
 /**
- * Extract all plausible numbers from OCR text.
- * Shows everything found – user picks the correct price.
+ * Extract price candidates from OCR text.
+ * Only numbers paired with kr, SEK, :- or similar markers.
  */
+
+function normalizeForPriceScan(text) {
+  return text
+    .replace(/\r?\n/g, ' ')
+    .replace(/k\s*r\.?/gi, 'kr')
+    .replace(/s\s*e\s*k\.?/gi, 'sek')
+    .replace(/:\s*-+/g, ':-')
+    .replace(/-\s*:/g, ':-')
+    .replace(/[—–]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function parsePriceNumber(raw) {
+  if (!raw) return null
+  const joined = raw.trim().replace(/(?<=\d)\s+(?=\d)/g, '').replace(',', '.')
+  const value = parseFloat(joined)
+  if (Number.isNaN(value) || value <= 0 || value > 999_999) return null
+  return Math.round(value * 100) / 100
+}
+
+function addCandidate(store, seen, value, priority, order) {
+  const key = value.toFixed(2)
+  const existing = store.get(key)
+  if (existing) {
+    if (priority > existing.priority) {
+      existing.priority = priority
+    }
+    return
+  }
+  seen.add(key)
+  store.set(key, { value, priority, order })
+}
+
+const PRICE_PATTERNS = [
+  // 157 kr, 157,50 kr, 1 432 kr, 157 SEK, 157:-
+  { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*(?:kr|sek|:-)/gi, priority: 3 },
+  // kr 157, SEK 149
+  { re: /(?:kr|sek)\s*(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/gi, priority: 3 },
+  // :- 157 (sällsynt men förekommer)
+  { re: /:-\s*(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/gi, priority: 3 },
+  // 157 k – OCR missade ofta 'r' i kr
+  { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*k\b/gi, priority: 2 },
+]
+
 export function extractNumbersFromText(text) {
   if (!text || !text.trim()) return []
 
-  const normalized = text
-    .replace(/[OoØø]/g, '0')
-    .replace(/[Il|]/g, '1')
-    .replace(/[Ss$]/g, '5')
-    .replace(/[Bb]/g, '8')
-    .replace(/[Zz]/g, '2')
-    .replace(/\s+/g, ' ')
-
-  const matches = normalized.match(/\d+(?:[.,]\d{1,2})?/g) || []
-
+  const normalized = normalizeForPriceScan(text)
   const seen = new Set()
-  const results = []
+  const store = new Map()
+  let order = 0
 
-  for (const match of matches) {
-    const cleaned = match.replace(',', '.')
-    const value = parseFloat(cleaned)
-
-    if (Number.isNaN(value) || value <= 0) continue
-    if (value > 999_999) continue
-
-    const key = value.toFixed(2)
-    if (seen.has(key)) continue
-    seen.add(key)
-
-    results.push(value)
+  for (const { re, priority } of PRICE_PATTERNS) {
+    re.lastIndex = 0
+    for (const match of normalized.matchAll(re)) {
+      const value = parsePriceNumber(match[1])
+      if (value !== null) {
+        addCandidate(store, seen, value, priority, order++)
+      }
+    }
   }
 
-  return results.sort((a, b) => a - b)
+  return [...store.values()]
+    .sort((a, b) => b.priority - a.priority || a.order - b.order)
+    .map((c) => c.value)
 }
 
 export function formatNumberButton(value) {

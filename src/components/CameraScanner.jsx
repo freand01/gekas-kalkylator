@@ -96,7 +96,9 @@ export default function CameraScanner({ onAdd, isActive }) {
         const numbers = extractNumbersFromText(data.text)
 
         if (numbers.length === 0) {
-          setError('Hittade inga siffror – försök igen med tydligare bild av prislappen.')
+          setError(
+            'Hittade inga priser märkta med kr, SEK eller :- – rikta kameran mot priset på etiketten.',
+          )
         } else {
           setCandidates(numbers)
         }
