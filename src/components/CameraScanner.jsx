@@ -15,6 +15,7 @@ export default function CameraScanner({ onAdd, isActive }) {
   const [cameraError, setCameraError] = useState(null)
   const [isScanning, setIsScanning] = useState(false)
   const [candidates, setCandidates] = useState([])
+  const [usedFallback, setUsedFallback] = useState(false)
   const [error, setError] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
 
@@ -89,18 +90,20 @@ export default function CameraScanner({ onAdd, isActive }) {
     async (imageSource) => {
       setError(null)
       setCandidates([])
+      setUsedFallback(false)
       setIsScanning(true)
 
       try {
         const { data } = await recognize(imageSource)
-        const numbers = extractNumbersFromText(data.text)
+        const { numbers, usedFallback: fallback } = extractNumbersFromText(data.text)
 
         if (numbers.length === 0) {
           setError(
-            'Hittade inga priser märkta med kr, SEK eller :- – rikta kameran mot priset på etiketten.',
+            'Hittade inga siffror att tolka som pris – försök igen med tydligare bild.',
           )
         } else {
           setCandidates(numbers)
+          setUsedFallback(fallback)
         }
       } catch {
         setError('Kunde inte läsa bilden. Försök igen eller använd manuell inmatning.')
@@ -177,6 +180,7 @@ export default function CameraScanner({ onAdd, isActive }) {
   const handleSelectPrice = (price) => {
     onAdd(price, 'ocr')
     setCandidates([])
+    setUsedFallback(false)
     setError(null)
     revokePreview()
     setCameraMode('live')
@@ -184,6 +188,7 @@ export default function CameraScanner({ onAdd, isActive }) {
 
   const handleReset = () => {
     setCandidates([])
+    setUsedFallback(false)
     setError(null)
     revokePreview()
     setCameraMode('live')
@@ -275,7 +280,11 @@ export default function CameraScanner({ onAdd, isActive }) {
 
       {candidates.length > 0 && (
         <div className="scanner__candidates">
-          <p className="scanner__candidates-label">Välj rätt pris:</p>
+          <p className="scanner__candidates-label">
+            {usedFallback
+              ? 'Ingen kr/SEK hittades – välj sannolikt pris:'
+              : 'Välj rätt pris:'}
+          </p>
           <div className="scanner__candidates-grid">
             {candidates.map((num) => (
               <button

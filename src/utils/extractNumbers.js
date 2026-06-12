@@ -1,6 +1,6 @@
 /**
  * Extract price candidates from OCR text.
- * Only numbers paired with kr, SEK, :- or similar markers.
+ * Prioritizes numbers with kr/SEK/:- markers; falls back to likely prices if none found.
  */
 
 function normalizeForPriceScan(text) {
@@ -36,6 +36,24 @@ function addCandidate(store, seen, value, priority, order) {
   store.set(key, { value, priority, order })
 }
 
+function toSortedValues(store) {
+  return [...store.values()]
+    .sort((a, b) => b.priority - a.priority || a.order - b.order)
+    .map((c) => c.value)
+}
+
+function isLikelyFallbackPrice(value, raw) {
+  if (value <= 0 || value > 99_999) return false
+
+  const joined = raw.trim().replace(/(?<=\d)\s+(?=\d)/g, '')
+  const hasDecimal = /[.,]\d{1,2}$/.test(joined)
+  if (hasDecimal) return true
+
+  const digitCount = joined.replace(/\D/g, '').length
+  // 2–4 siffror = typiskt pris; 5+ = ofta artikelnummer
+  return digitCount >= 2 && digitCount <= 4
+}
+
 const PRICE_PATTERNS = [
   // 157 kr, 157,50 kr, 1 432 kr, 157 SEK, 157:-
   { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*(?:kr|sek|:-)/gi, priority: 3 },
@@ -47,10 +65,9 @@ const PRICE_PATTERNS = [
   { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*k\b/gi, priority: 2 },
 ]
 
-export function extractNumbersFromText(text) {
-  if (!text || !text.trim()) return []
+const FALLBACK_PATTERN = /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/g
 
-  const normalized = normalizeForPriceScan(text)
+function extractMarkedPrices(normalized) {
   const seen = new Set()
   const store = new Map()
   let order = 0
@@ -65,9 +82,39 @@ export function extractNumbersFromText(text) {
     }
   }
 
-  return [...store.values()]
-    .sort((a, b) => b.priority - a.priority || a.order - b.order)
-    .map((c) => c.value)
+  return toSortedValues(store)
+}
+
+function extractFallbackPrices(normalized) {
+  const seen = new Set()
+  const store = new Map()
+  let order = 0
+
+  for (const match of normalized.matchAll(FALLBACK_PATTERN)) {
+    const raw = match[1]
+    const value = parsePriceNumber(raw)
+    if (value !== null && isLikelyFallbackPrice(value, raw)) {
+      addCandidate(store, seen, value, 1, order++)
+    }
+  }
+
+  return toSortedValues(store)
+}
+
+export function extractNumbersFromText(text) {
+  if (!text || !text.trim()) {
+    return { numbers: [], usedFallback: false }
+  }
+
+  const normalized = normalizeForPriceScan(text)
+  const marked = extractMarkedPrices(normalized)
+
+  if (marked.length > 0) {
+    return { numbers: marked, usedFallback: false }
+  }
+
+  const fallback = extractFallbackPrices(normalized)
+  return { numbers: fallback, usedFallback: fallback.length > 0 }
 }
 
 export function formatNumberButton(value) {
