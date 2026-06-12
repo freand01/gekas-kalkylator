@@ -109,16 +109,43 @@ export default function CameraScanner({ onAdd, isActive }) {
     [recognize],
   )
 
-  const captureFromVideo = useCallback(async () => {
-    const video = videoRef.current
-    if (!video?.videoWidth) return
+  const captureFrameFromVideo = useCallback(async (video) => {
+    const track = streamRef.current?.getVideoTracks()[0]
 
-    stopCamera()
+    if (track && 'ImageCapture' in window) {
+      try {
+        const capture = new ImageCapture(track)
+        const bitmap = await capture.grabFrame()
+        const canvas = document.createElement('canvas')
+        canvas.width = bitmap.width
+        canvas.height = bitmap.height
+        canvas.getContext('2d').drawImage(bitmap, 0, 0)
+        bitmap.close()
+        return canvas
+      } catch {
+        // Fall back to canvas capture below
+      }
+    }
+
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      await new Promise((resolve) => {
+        video.addEventListener('loadeddata', resolve, { once: true })
+      })
+    }
 
     const canvas = document.createElement('canvas')
     canvas.width = video.videoWidth
     canvas.height = video.videoHeight
-    canvas.getContext('2d').drawImage(video, 0, 0)
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+    return canvas
+  }, [])
+
+  const captureFromVideo = useCallback(async () => {
+    const video = videoRef.current
+    if (!video?.videoWidth) return
+
+    const canvas = await captureFrameFromVideo(video)
+    stopCamera()
 
     revokePreview()
     const url = await canvasToObjectUrl(canvas)
@@ -126,7 +153,7 @@ export default function CameraScanner({ onAdd, isActive }) {
     setCameraMode('preview')
 
     await runOcr(canvas)
-  }, [stopCamera, revokePreview, runOcr])
+  }, [captureFrameFromVideo, stopCamera, revokePreview, runOcr])
 
   const handleFileChange = useCallback(
     async (event) => {
