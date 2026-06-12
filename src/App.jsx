@@ -53,7 +53,7 @@ export default function App() {
           hidden={activeTab !== 'scanner'}
           className="tab-panel"
         >
-          <CameraScanner onAdd={addItem} />
+          <CameraScanner onAdd={addItem} isActive={activeTab === 'scanner'} />
         </div>
 
         <CartList items={items} onRemove={removeItem} />
