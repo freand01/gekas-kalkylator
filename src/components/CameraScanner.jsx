@@ -1,23 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, ImagePlus, Loader2 } from 'lucide-react'
 import { useOcrWorker } from '../hooks/useOcrWorker'
-import { canvasToObjectUrl } from '../utils/prepareImageForOcr'
-import { extractNumbersFromText, formatNumberButton } from '../utils/extractNumbers'
+import { cropAroundPoint } from '../utils/imageCoords'
+import {
+  canvasToObjectUrl,
+  downscaleIfNeeded,
+  loadImageSource,
+} from '../utils/prepareImageForOcr'
+import PricePicker from './PricePicker'
+import PriceConfirm from './PriceConfirm'
 
 export default function CameraScanner({ onAdd, isActive }) {
   const fileInputRef = useRef(null)
   const videoRef = useRef(null)
   const streamRef = useRef(null)
+  const sourceCanvasRef = useRef(null)
 
-  const { recognize, ready: ocrReady } = useOcrWorker(isActive)
+  const { readPriceFromCrop, ready: ocrReady } = useOcrWorker(isActive)
 
-  const [cameraMode, setCameraMode] = useState('live')
+  const [step, setStep] = useState('live')
   const [cameraError, setCameraError] = useState(null)
-  const [isScanning, setIsScanning] = useState(false)
-  const [candidates, setCandidates] = useState([])
-  const [usedFallback, setUsedFallback] = useState(false)
+  const [isReading, setIsReading] = useState(false)
   const [error, setError] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
+  const [imageSize, setImageSize] = useState({ w: 0, h: 0 })
+  const [detectedPrice, setDetectedPrice] = useState(null)
+  const [lowConfidence, setLowConfidence] = useState(false)
+  const [pickId, setPickId] = useState(0)
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop())
@@ -28,7 +37,7 @@ export default function CameraScanner({ onAdd, isActive }) {
   }, [])
 
   useEffect(() => {
-    if (!isActive || cameraMode !== 'live' || previewUrl) return
+    if (!isActive || step !== 'live' || previewUrl) return
 
     let cancelled = false
 
@@ -36,7 +45,6 @@ export default function CameraScanner({ onAdd, isActive }) {
       if (!navigator.mediaDevices?.getUserMedia) {
         if (!cancelled) {
           setCameraError('Kameran stöds inte – välj bild från galleri istället.')
-          setCameraMode('fallback')
         }
         return
       }
@@ -46,8 +54,8 @@ export default function CameraScanner({ onAdd, isActive }) {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 960 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
           audio: false,
         })
@@ -66,7 +74,6 @@ export default function CameraScanner({ onAdd, isActive }) {
       } catch {
         if (!cancelled) {
           setCameraError('Kunde inte starta kameran – välj bild från galleri istället.')
-          setCameraMode('fallback')
         }
       }
     }
@@ -77,7 +84,7 @@ export default function CameraScanner({ onAdd, isActive }) {
       cancelled = true
       stopCamera()
     }
-  }, [isActive, cameraMode, previewUrl, stopCamera])
+  }, [isActive, step, previewUrl, stopCamera])
 
   const revokePreview = useCallback(() => {
     if (previewUrl) {
@@ -86,32 +93,33 @@ export default function CameraScanner({ onAdd, isActive }) {
     }
   }, [previewUrl])
 
-  const runOcr = useCallback(
-    async (imageSource) => {
+  const resetFlow = useCallback(() => {
+    setError(null)
+    setDetectedPrice(null)
+    setLowConfidence(false)
+    setIsReading(false)
+    revokePreview()
+    sourceCanvasRef.current = null
+    setImageSize({ w: 0, h: 0 })
+    setStep('live')
+  }, [revokePreview])
+
+  const setCapturedImage = useCallback(
+    async (canvas) => {
+      stopCamera()
+      const stored = await downscaleIfNeeded(canvas)
+      sourceCanvasRef.current = stored
+      setImageSize({ w: stored.width, h: stored.height })
+
+      revokePreview()
+      const url = await canvasToObjectUrl(stored)
+      setPreviewUrl(url)
+      setStep('pick')
       setError(null)
-      setCandidates([])
-      setUsedFallback(false)
-      setIsScanning(true)
-
-      try {
-        const { data } = await recognize(imageSource)
-        const { numbers, usedFallback: fallback } = extractNumbersFromText(data.text)
-
-        if (numbers.length === 0) {
-          setError(
-            'Hittade inga siffror att tolka som pris – försök igen med tydligare bild.',
-          )
-        } else {
-          setCandidates(numbers)
-          setUsedFallback(fallback)
-        }
-      } catch {
-        setError('Kunde inte läsa bilden. Försök igen eller använd manuell inmatning.')
-      } finally {
-        setIsScanning(false)
-      }
+      setDetectedPrice(null)
+      setLowConfidence(false)
     },
-    [recognize],
+    [stopCamera, revokePreview],
   )
 
   const captureFrameFromVideo = useCallback(async (video) => {
@@ -128,14 +136,8 @@ export default function CameraScanner({ onAdd, isActive }) {
         bitmap.close()
         return canvas
       } catch {
-        // Fall back to canvas capture below
+        // Fall back below
       }
-    }
-
-    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-      await new Promise((resolve) => {
-        video.addEventListener('loadeddata', resolve, { once: true })
-      })
     }
 
     const canvas = document.createElement('canvas')
@@ -148,17 +150,9 @@ export default function CameraScanner({ onAdd, isActive }) {
   const captureFromVideo = useCallback(async () => {
     const video = videoRef.current
     if (!video?.videoWidth) return
-
     const canvas = await captureFrameFromVideo(video)
-    stopCamera()
-
-    revokePreview()
-    const url = await canvasToObjectUrl(canvas)
-    setPreviewUrl(url)
-    setCameraMode('preview')
-
-    await runOcr(canvas)
-  }, [captureFrameFromVideo, stopCamera, revokePreview, runOcr])
+    await setCapturedImage(canvas)
+  }, [captureFrameFromVideo, setCapturedImage])
 
   const handleFileChange = useCallback(
     async (event) => {
@@ -166,36 +160,66 @@ export default function CameraScanner({ onAdd, isActive }) {
       event.target.value = ''
       if (!file) return
 
-      stopCamera()
-      setCameraMode('preview')
-
-      revokePreview()
-      setPreviewUrl(URL.createObjectURL(file))
-
-      await runOcr(file)
+      const canvas = await loadImageSource(file)
+      await setCapturedImage(canvas)
     },
-    [stopCamera, revokePreview, runOcr],
+    [setCapturedImage],
   )
 
-  const handleSelectPrice = (price) => {
+  const handlePick = useCallback(
+    async (point) => {
+      const source = sourceCanvasRef.current
+      if (!source || isReading) return
+
+      setIsReading(true)
+      setError(null)
+
+      try {
+        const crop = cropAroundPoint(
+          source,
+          point.x,
+          point.y,
+          point.naturalW,
+          point.naturalH,
+        )
+        const { price, confidence } = await readPriceFromCrop(crop)
+
+        setDetectedPrice(price)
+        setLowConfidence(confidence < 55 || price == null)
+        setPickId((id) => id + 1)
+        setStep('confirm')
+
+        if (price == null) {
+          setError('Kunde inte läsa priset – skriv in det manuellt nedan.')
+        }
+      } catch {
+        setDetectedPrice(null)
+        setLowConfidence(true)
+        setPickId((id) => id + 1)
+        setStep('confirm')
+        setError('Kunde inte läsa priset – skriv in det manuellt nedan.')
+      } finally {
+        setIsReading(false)
+      }
+    },
+    [isReading, readPriceFromCrop],
+  )
+
+  const handleConfirm = (price) => {
     onAdd(price, 'ocr')
-    setCandidates([])
-    setUsedFallback(false)
-    setError(null)
-    revokePreview()
-    setCameraMode('live')
+    resetFlow()
   }
 
-  const handleReset = () => {
-    setCandidates([])
-    setUsedFallback(false)
+  const handleRetryPick = () => {
+    setStep('pick')
+    setDetectedPrice(null)
+    setLowConfidence(false)
     setError(null)
-    revokePreview()
-    setCameraMode('live')
   }
 
-  const showLiveCamera = cameraMode === 'live' && !previewUrl
-  const showPreview = Boolean(previewUrl)
+  const showLiveCamera = step === 'live' && !previewUrl
+  const showPick = step === 'pick' && previewUrl
+  const showConfirm = step === 'confirm'
 
   return (
     <div className="scanner">
@@ -210,7 +234,7 @@ export default function CameraScanner({ onAdd, isActive }) {
       />
 
       {showLiveCamera && (
-        <div className="scanner__viewport" aria-label="Kameravy – det här skannas">
+        <div className="scanner__viewport" aria-label="Kameravy">
           <video ref={videoRef} playsInline muted autoPlay className="scanner__media" />
           {!ocrReady && (
             <div className="scanner__viewport-overlay">
@@ -221,19 +245,35 @@ export default function CameraScanner({ onAdd, isActive }) {
         </div>
       )}
 
-      {showPreview && (
-        <div className="scanner__viewport scanner__viewport--preview" aria-label="Skannad bild">
-          <img src={previewUrl} alt="Bild som skannas" className="scanner__media" />
-          {isScanning && (
-            <div className="scanner__viewport-overlay">
-              <Loader2 className="scanner__spinner" size={32} aria-hidden="true" />
-              <span>Läser prislapp…</span>
+      {showPick && (
+        <>
+          <PricePicker
+            imageUrl={previewUrl}
+            naturalWidth={imageSize.w}
+            naturalHeight={imageSize.h}
+            onPick={handlePick}
+            disabled={isReading || !ocrReady}
+          />
+          {isReading && (
+            <div className="scanner__reading" role="status">
+              <Loader2 className="scanner__spinner" size={24} aria-hidden="true" />
+              <span>Läser markerat pris…</span>
             </div>
           )}
-        </div>
+        </>
       )}
 
-      {cameraError && (
+      {showConfirm && (
+        <PriceConfirm
+          key={pickId}
+          initialPrice={detectedPrice}
+          lowConfidence={lowConfidence}
+          onConfirm={handleConfirm}
+          onRetry={handleRetryPick}
+        />
+      )}
+
+      {cameraError && step === 'live' && (
         <p className="scanner__hint" role="status">
           {cameraError}
         </p>
@@ -241,31 +281,29 @@ export default function CameraScanner({ onAdd, isActive }) {
 
       <div className="scanner__actions">
         {showLiveCamera && (
-          <button
-            type="button"
-            className="btn btn--camera"
-            onClick={captureFromVideo}
-            disabled={isScanning || !ocrReady}
-          >
-            <Camera size={28} aria-hidden="true" />
-            Ta bild på prislapp
-          </button>
+          <>
+            <button
+              type="button"
+              className="btn btn--camera"
+              onClick={captureFromVideo}
+              disabled={!ocrReady}
+            >
+              <Camera size={28} aria-hidden="true" />
+              Ta bild på prislapp
+            </button>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <ImagePlus size={22} aria-hidden="true" />
+              Välj från galleri
+            </button>
+          </>
         )}
 
-        {showLiveCamera && (
-          <button
-            type="button"
-            className="btn btn--secondary"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isScanning}
-          >
-            <ImagePlus size={22} aria-hidden="true" />
-            Välj från galleri
-          </button>
-        )}
-
-        {showPreview && !isScanning && (
-          <button type="button" className="btn btn--secondary" onClick={handleReset}>
+        {(showPick || showConfirm) && (
+          <button type="button" className="btn btn--secondary" onClick={resetFlow}>
             <Camera size={22} aria-hidden="true" />
             Ta ny bild
           </button>
@@ -276,28 +314,6 @@ export default function CameraScanner({ onAdd, isActive }) {
         <p className="scanner__error" role="alert">
           {error}
         </p>
-      )}
-
-      {candidates.length > 0 && (
-        <div className="scanner__candidates">
-          <p className="scanner__candidates-label">
-            {usedFallback
-              ? 'Ingen kr/SEK hittades – välj sannolikt pris:'
-              : 'Välj rätt pris:'}
-          </p>
-          <div className="scanner__candidates-grid">
-            {candidates.map((num) => (
-              <button
-                key={num}
-                type="button"
-                className="btn btn--price-candidate"
-                onClick={() => handleSelectPrice(num)}
-              >
-                {formatNumberButton(num)}
-              </button>
-            ))}
-          </div>
-        </div>
       )}
     </div>
   )

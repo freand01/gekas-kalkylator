@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createWorker } from 'tesseract.js'
-import { prepareImageForOcr } from '../utils/prepareImageForOcr'
+import { extractBestPrice } from '../utils/extractNumbers'
+import { prepareCropForOcr } from '../utils/prepareImageForOcr'
 
 export function useOcrWorker(isActive) {
   const workerRef = useRef(null)
@@ -25,9 +26,9 @@ export function useOcrWorker(isActive) {
       }
 
       initPromiseRef.current = (async () => {
-        const worker = await createWorker('swe', 1, { logger: () => {} })
+        const worker = await createWorker('eng', 1, { logger: () => {} })
         await worker.setParameters({
-          tessedit_pageseg_mode: '11',
+          tessedit_pageseg_mode: '7',
           tessedit_char_whitelist: '0123456789krKR:,.- SEK',
         })
         workerRef.current = worker
@@ -52,7 +53,7 @@ export function useOcrWorker(isActive) {
     }
   }, [])
 
-  const recognize = useCallback(async (imageSource) => {
+  const readPriceFromCrop = useCallback(async (cropCanvas) => {
     if (!workerRef.current) {
       if (!initPromiseRef.current) {
         throw new Error('OCR inte redo')
@@ -60,9 +61,16 @@ export function useOcrWorker(isActive) {
       await initPromiseRef.current
     }
 
-    const canvas = await prepareImageForOcr(imageSource)
-    return workerRef.current.recognize(canvas)
+    const prepared = prepareCropForOcr(cropCanvas)
+    const { data } = await workerRef.current.recognize(prepared)
+    const price = extractBestPrice(data.text)
+
+    return {
+      price,
+      rawText: data.text.trim(),
+      confidence: data.confidence,
+    }
   }, [])
 
-  return { recognize, ready }
+  return { readPriceFromCrop, ready }
 }

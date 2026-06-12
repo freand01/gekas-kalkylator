@@ -1,125 +1,67 @@
 /**
- * Extract price candidates from OCR text.
- * Prioritizes numbers with kr/SEK/:- markers; falls back to likely prices if none found.
+ * Pick the most likely price from OCR text on a cropped region.
  */
+function parseAmount(raw) {
+  if (!raw) return null
+  const joined = raw.replace(/(?<=\d)\s+(?=\d)/g, '').replace(',', '.')
+  const value = parseFloat(joined)
+  if (Number.isNaN(value) || value <= 0 || value > 999_999) return null
+  return Math.round(value * 100) / 100
+}
 
-function normalizeForPriceScan(text) {
+function normalizeText(text) {
   return text
     .replace(/\r?\n/g, ' ')
     .replace(/k\s*r\.?/gi, 'kr')
     .replace(/s\s*e\s*k\.?/gi, 'sek')
     .replace(/:\s*-+/g, ':-')
     .replace(/-\s*:/g, ':-')
-    .replace(/[—–]/g, '-')
+    .replace(/[OoØø]/g, '0')
+    .replace(/[Il|]/g, '1')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
-function parsePriceNumber(raw) {
-  if (!raw) return null
-  const joined = raw.trim().replace(/(?<=\d)\s+(?=\d)/g, '').replace(',', '.')
-  const value = parseFloat(joined)
-  if (Number.isNaN(value) || value <= 0 || value > 999_999) return null
-  return Math.round(value * 100) / 100
-}
-
-function addCandidate(store, seen, value, priority, order) {
-  const key = value.toFixed(2)
-  const existing = store.get(key)
-  if (existing) {
-    if (priority > existing.priority) {
-      existing.priority = priority
-    }
-    return
-  }
-  seen.add(key)
-  store.set(key, { value, priority, order })
-}
-
-function toSortedValues(store) {
-  return [...store.values()]
-    .sort((a, b) => b.priority - a.priority || a.order - b.order)
-    .map((c) => c.value)
-}
-
-function isLikelyFallbackPrice(value, raw) {
-  if (value <= 0 || value > 99_999) return false
-
-  const joined = raw.trim().replace(/(?<=\d)\s+(?=\d)/g, '')
-  const hasDecimal = /[.,]\d{1,2}$/.test(joined)
-  if (hasDecimal) return true
-
-  const digitCount = joined.replace(/\D/g, '').length
-  // 2–4 siffror = typiskt pris; 5+ = ofta artikelnummer
-  return digitCount >= 2 && digitCount <= 4
-}
-
-const PRICE_PATTERNS = [
-  // 157 kr, 157,50 kr, 1 432 kr, 157 SEK, 157:-
-  { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*(?:kr|sek|:-)/gi, priority: 3 },
-  // kr 157, SEK 149
-  { re: /(?:kr|sek)\s*(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/gi, priority: 3 },
-  // :- 157 (sällsynt men förekommer)
-  { re: /:-\s*(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/gi, priority: 3 },
-  // 157 k – OCR missade ofta 'r' i kr
-  { re: /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*k\b/gi, priority: 2 },
+const MARKED = [
+  /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*(?:kr|sek|:-)/gi,
+  /(?:kr|sek)\s*(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/gi,
+  /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)\s*k\b/gi,
 ]
 
-const FALLBACK_PATTERN = /(\d+(?:\s+\d+)*(?:[.,]\d{1,2})?)/g
+export function extractBestPrice(text) {
+  if (!text?.trim()) return null
 
-function extractMarkedPrices(normalized) {
-  const seen = new Set()
-  const store = new Map()
-  let order = 0
+  const normalized = normalizeText(text)
+  const candidates = []
 
-  for (const { re, priority } of PRICE_PATTERNS) {
-    re.lastIndex = 0
-    for (const match of normalized.matchAll(re)) {
-      const value = parsePriceNumber(match[1])
+  for (const pattern of MARKED) {
+    pattern.lastIndex = 0
+    for (const match of normalized.matchAll(pattern)) {
+      const value = parseAmount(match[1])
       if (value !== null) {
-        addCandidate(store, seen, value, priority, order++)
+        candidates.push({ value, score: 100 + String(match[1]).replace(/\D/g, '').length })
       }
     }
   }
 
-  return toSortedValues(store)
-}
-
-function extractFallbackPrices(normalized) {
-  const seen = new Set()
-  const store = new Map()
-  let order = 0
-
-  for (const match of normalized.matchAll(FALLBACK_PATTERN)) {
-    const raw = match[1]
-    const value = parsePriceNumber(raw)
-    if (value !== null && isLikelyFallbackPrice(value, raw)) {
-      addCandidate(store, seen, value, 1, order++)
+  const loose = normalized.match(/\d+(?:[.,]\d{1,2})?/g) || []
+  for (const token of loose) {
+    const digits = token.replace(/\D/g, '')
+    if (digits.length < 2) continue
+    const value = parseAmount(token)
+    if (value !== null) {
+      candidates.push({ value, score: 50 + digits.length })
     }
   }
 
-  return toSortedValues(store)
+  if (candidates.length === 0) return null
+
+  candidates.sort((a, b) => b.score - a.score || b.value - a.value)
+  return candidates[0].value
 }
 
-export function extractNumbersFromText(text) {
-  if (!text || !text.trim()) {
-    return { numbers: [], usedFallback: false }
-  }
-
-  const normalized = normalizeForPriceScan(text)
-  const marked = extractMarkedPrices(normalized)
-
-  if (marked.length > 0) {
-    return { numbers: marked, usedFallback: false }
-  }
-
-  const fallback = extractFallbackPrices(normalized)
-  return { numbers: fallback, usedFallback: fallback.length > 0 }
-}
-
-export function formatNumberButton(value) {
-  if (Number.isInteger(value)) {
-    return `${value} kr`
-  }
-  return `${value.toFixed(2).replace('.', ',')} kr`
+export function priceToInputString(value) {
+  if (value == null) return ''
+  if (Number.isInteger(value)) return String(value)
+  return value.toFixed(2).replace('.', ',')
 }
